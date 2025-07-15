@@ -8,6 +8,12 @@ from gtts import gTTS
 import io
 import base64
 from ebooklib import epub
+import traceback
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
@@ -21,8 +27,6 @@ os.makedirs(app.config['AUDIO_FOLDER'], exist_ok=True)
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'docx', 'doc', 'epub'}
 
 # gTTS voice options (limited by language/accent)
-# 'en' (default, female), 'en-uk' (UK female), 'en-us' (US female), 'en-au' (AU female), 'en-in' (Indian female), 'en-uk-rp' (UK male), 'en-uk-north' (UK male), 'en-uk-rp' (UK male), 'en-uk-wmids' (UK male), 'en-scotland' (Scottish), 'en-uk-london' (London), 'en-uk-leeds' (Leeds), 'en-uk-manc' (Manchester), 'en-uk-lancashire' (Lancashire), 'en-uk-liverpool' (Liverpool), 'en-uk-geordie' (Geordie)
-# gTTS does not support true male/female selection, but some accents sound more male/female.
 VOICE_OPTIONS = [
     {"label": "English (US, Female)", "value": "en"},
     {"label": "English (UK, Female)", "value": "en-uk"},
@@ -47,47 +51,79 @@ def extract_text_from_file(file_path, file_extension):
     """Extract text from different file formats"""
     text = ""
     try:
+        logger.info(f"Extracting text from {file_path} with extension {file_extension}")
+        
         if file_extension == 'txt':
-            with open(file_path, 'r', encoding='utf-8') as file:
-                text = file.read()
+            # Try different encodings for text files
+            encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+            for encoding in encodings:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as file:
+                        text = file.read()
+                    logger.info(f"Successfully read text file with {encoding} encoding")
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if not text:
+                return "Error extracting text: Could not decode text file with any supported encoding"
+                
         elif file_extension == 'pdf':
             with open(file_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
-                for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
+                logger.info(f"PDF has {len(pdf_reader.pages)} pages")
+                for i, page in enumerate(pdf_reader.pages):
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+                    logger.info(f"Extracted {len(page_text)} characters from page {i+1}")
+                    
         elif file_extension in ['docx', 'doc']:
             doc = Document(file_path)
+            logger.info(f"Document has {len(doc.paragraphs)} paragraphs")
             for paragraph in doc.paragraphs:
-                text += paragraph.text + "\n"
+                if paragraph.text.strip():
+                    text += paragraph.text + "\n"
+                    
         elif file_extension == 'epub':
             book = epub.read_epub(file_path)
+            logger.info(f"EPUB has {len(book.get_items())} items")
             for item in book.get_items():
                 if item.get_type() == epub.ITEM_DOCUMENT:
-                    from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(item.get_content(), 'html.parser')
-                    text += ' '.join([t for t in soup.stripped_strings]) + "\n"
-        return text.strip()
+                    try:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(item.get_content(), 'html.parser')
+                        item_text = ' '.join([t for t in soup.stripped_strings])
+                        if item_text:
+                            text += item_text + "\n"
+                    except Exception as e:
+                        logger.error(f"Error parsing EPUB item: {e}")
+                        continue
+                        
+        text = text.strip()
+        logger.info(f"Extracted {len(text)} characters of text")
+        return text if text else "Error extracting text: No text content found"
+        
     except Exception as e:
-        return f"Error extracting text: {str(e)}"
+        error_msg = f"Error extracting text: {str(e)}"
+        logger.error(f"{error_msg}\n{traceback.format_exc()}")
+        return error_msg
 
 def text_to_speech(text, language='en'):
     """Convert text to speech and return audio data"""
     try:
+        logger.info(f"Converting text to speech with language: {language}")
         tts = gTTS(text=text, lang=language, tld='com', slow=False)
         audio_buffer = io.BytesIO()
         tts.write_to_fp(audio_buffer)
         audio_buffer.seek(0)
+        logger.info("Successfully converted text to speech")
         return audio_buffer
     except Exception as e:
+        logger.error(f"Error in text_to_speech: {e}\n{traceback.format_exc()}")
         return None
 
 def get_voice_params(voice_value):
     # Map UI voice value to gTTS language/accent
-    # gTTS uses 'lang' and 'tld' (top-level domain) for accent
-    # We'll use 'lang' for main language, and tld for accent if needed
-    # Example: 'en', 'en-uk', 'en-us', etc.
-    # For gTTS, tld can be 'com', 'co.uk', 'com.au', 'co.in', etc.
-    # We'll map accordingly
     mapping = {
         'en': ('en', 'com'),
         'en-uk': ('en', 'co.uk'),
@@ -109,12 +145,15 @@ def get_voice_params(voice_value):
 def text_to_speech_with_voice(text, voice_value):
     lang, tld = get_voice_params(voice_value)
     try:
+        logger.info(f"Converting text to speech with voice: {voice_value} (lang={lang}, tld={tld})")
         tts = gTTS(text=text, lang=lang, tld=tld, slow=False)
         audio_buffer = io.BytesIO()
         tts.write_to_fp(audio_buffer)
         audio_buffer.seek(0)
+        logger.info("Successfully converted text to speech with voice")
         return audio_buffer
     except Exception as e:
+        logger.error(f"Error in text_to_speech_with_voice: {e}\n{traceback.format_exc()}")
         return None
 
 @app.route('/')
@@ -128,35 +167,67 @@ def voice_options():
 @app.route('/convert', methods=['POST'])
 def convert_to_audio():
     try:
+        logger.info("Received file conversion request")
+        
         if 'file' not in request.files:
+            logger.error("No file uploaded")
             return jsonify({'error': 'No file uploaded'}), 400
+            
         file = request.files['file']
         if file.filename == '':
+            logger.error("No file selected")
             return jsonify({'error': 'No file selected'}), 400
+            
         if not allowed_file(file.filename):
+            logger.error(f"File type not supported: {file.filename}")
             return jsonify({'error': 'File type not supported'}), 400
+            
         voice = request.form.get('voice', 'en')
         filename = secure_filename(file.filename)
         file_extension = filename.rsplit('.', 1)[1].lower()
+        
+        logger.info(f"Processing file: {filename} (extension: {file_extension}, voice: {voice})")
+        
+        # Save file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}') as temp_file:
             file.save(temp_file.name)
             temp_file_path = temp_file.name
+            
+        logger.info(f"File saved temporarily at: {temp_file_path}")
+        
+        # Extract text
         extracted_text = extract_text_from_file(temp_file_path, file_extension)
-        os.unlink(temp_file_path)
+        
+        # Clean up temp file
+        try:
+            os.unlink(temp_file_path)
+        except:
+            pass
+            
         if not extracted_text or extracted_text.startswith("Error"):
+            logger.error(f"Text extraction failed: {extracted_text}")
             return jsonify({'error': extracted_text or 'No text could be extracted'}), 400
+            
+        # Convert to speech
         audio_buffer = text_to_speech_with_voice(extracted_text, voice)
         if audio_buffer is None:
+            logger.error("Failed to convert text to speech")
             return jsonify({'error': 'Failed to convert text to speech'}), 500
+            
         audio_data = base64.b64encode(audio_buffer.getvalue()).decode('utf-8')
+        
+        logger.info("Successfully converted file to audio")
         return jsonify({
             'success': True,
             'text': extracted_text,
             'audio_data': audio_data,
             'filename': filename
         })
+        
     except Exception as e:
-        return jsonify({'error': f'An error occurred: {str(e)}'}), 500
+        error_msg = f'An error occurred: {str(e)}'
+        logger.error(f"{error_msg}\n{traceback.format_exc()}")
+        return jsonify({'error': error_msg}), 500
 
 @app.route('/convert-text', methods=['POST'])
 def convert_text_to_audio():
@@ -164,18 +235,23 @@ def convert_text_to_audio():
         data = request.get_json()
         text = data.get('text', '').strip()
         voice = data.get('voice', 'en')
+        
         if not text:
             return jsonify({'error': 'No text provided'}), 400
+            
         audio_buffer = text_to_speech_with_voice(text, voice)
         if audio_buffer is None:
             return jsonify({'error': 'Failed to convert text to speech'}), 500
+            
         audio_data = base64.b64encode(audio_buffer.getvalue()).decode('utf-8')
         return jsonify({
             'success': True,
             'audio_data': audio_data
         })
     except Exception as e:
-        return jsonify({'error': f'An error occurred: {str(e)}'}), 500
+        error_msg = f'An error occurred: {str(e)}'
+        logger.error(f"{error_msg}\n{traceback.format_exc()}")
+        return jsonify({'error': error_msg}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)

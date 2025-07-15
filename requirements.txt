@@ -6,3 +6,4 @@ Werkzeug==2.3.7
 python-multipart==0.0.6
 Pillow==10.0.1
 EbookLib==0.18
+beautifulsoup4==4.12.2
